@@ -26,7 +26,7 @@ import { GoogleGenAI } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { savePDF, getPDF, deletePDF } from './lib/db';
+import { savePDF, getPDF, deletePDF, saveMessages, getMessages } from './lib/db';
 
 interface Message {
   role: 'user' | 'model';
@@ -88,9 +88,10 @@ export default function App() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [searchTerm, setSearchTerm] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
 
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || process.env.GEMINI_API_KEY || '');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('gemini_api_key') || (import.meta as any).env?.VITE_GEMINI_API_KEY || '');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [tempKey, setTempKey] = useState(apiKey);
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
@@ -150,14 +151,39 @@ export default function App() {
 
   // Persist docs and selection to localStorage
   useEffect(() => {
-    // Only store metadata to localStorage, not the blob URLs if possible, 
-    // but the restore logic expects them, so we store the presence of it.
     localStorage.setItem('ai_tutor_docs', JSON.stringify(docs));
   }, [docs]);
 
   useEffect(() => {
     localStorage.setItem('ai_tutor_selected_doc_id', selectedDoc.id);
+    
+    // Load messages for the newly selected doc
+    const loadChatHistory = async () => {
+      try {
+        const history = await getMessages(selectedDoc.id);
+        if (history) {
+          setMessages(history);
+        } else {
+          setMessages([]);
+        }
+      } catch (error) {
+        console.error("Failed to load chat history:", error);
+        setMessages([]);
+      }
+    };
+    loadChatHistory();
   }, [selectedDoc.id]);
+
+  // Save messages when they change
+  useEffect(() => {
+    if (messages.length > 0) {
+      saveMessages(selectedDoc.id, messages).catch(err => console.error("Failed to save chat:", err));
+    }
+  }, [messages, selectedDoc.id]);
+
+  const filteredDocs = docs.filter(doc => 
+    doc.title.toLowerCase().includes(searchTerm.toLowerCase())
+  );
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -233,10 +259,15 @@ export default function App() {
           
           대답 규칙:
           1. 항상 한국어로 답변하세요.
-          2. 쓸데없는 대화(인사, 도입부, 맺음말 등)는 생략하고, 질문에 대한 핵심 답변과 문제풀이 과정만 간결하게 제시하세요.
+          2. 정중하고 친근하게 대하되, 쓸데없는 도입부(예: "네 알겠습니다", "질문해주셔서 감사합니다")나 맺음말은 생략하고 바로 핵심 내용과 풀이 과정을 전문적으로 제시하세요.
           3. 수학 수식이나 물리 공식 등이 포함될 경우 반드시 Latex 형식을 사용하세요. (인라인: $...$, 블록: $$...$$)
-          4. 문서 내용과 관련 없는 질문이라면 주제로 돌아오도록 정중하게 한 문장으로만 안내하세요.`,
+          4. 문서 내용과 관련 없는 질문이라면 주제로 돌아오도록 정중하게 안내하세요.`,
         },
+        // 대화 내역(history)을 기반으로 대화 유지
+        history: messages.map(m => ({
+          role: m.role,
+          parts: [{ text: m.text }]
+        }))
       });
 
       const response = await chat.sendMessage({ message: input });
@@ -302,13 +333,25 @@ export default function App() {
             <input 
               type="text" 
               placeholder="문서 검색..." 
-              className="w-full pl-10 pr-4 py-2 bg-[#F4F3FA] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#4D5E8B]/20"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-10 py-2 bg-[#F4F3FA] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#4D5E8B]/20"
             />
+            {searchTerm && (
+              <button 
+                onClick={() => setSearchTerm('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2"
+              >
+                <X className="w-3 h-3 text-gray-400 hover:text-gray-600" />
+              </button>
+            )}
           </div>
 
-          <p className="text-[10px] font-bold text-gray-400 tracking-widest uppercase px-2 mb-2">최근 문서</p>
+          <p className="text-[10px] font-bold text-gray-400 tracking-widest uppercase px-2 mb-2">
+            {searchTerm ? `검색 결과 (${filteredDocs.length})` : '최근 문서'}
+          </p>
           
-          {docs.map(doc => (
+          {filteredDocs.map(doc => (
             <button
               key={doc.id}
               onClick={() => setSelectedDoc(doc)}

@@ -17,11 +17,16 @@ import {
   Loader2,
   Settings,
   X,
-  WifiOff
+  WifiOff,
+  Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { GoogleGenAI } from "@google/genai";
+import ReactMarkdown from 'react-markdown';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import { savePDF, getPDF, deletePDF } from './lib/db';
 
 interface Message {
   role: 'user' | 'model';
@@ -33,6 +38,7 @@ interface Document {
   title: string;
   content: string;
   date: string;
+  url?: string;
 }
 
 const MOCK_DOCS: Document[] = [
@@ -63,7 +69,21 @@ It consists of all the strategies that a business uses to reach its target audie
 ];
 
 export default function App() {
-  const [selectedDoc, setSelectedDoc] = useState<Document>(MOCK_DOCS[0]);
+  const [docs, setDocs] = useState<Document[]>(() => {
+    const savedDocs = localStorage.getItem('ai_tutor_docs');
+    return savedDocs ? JSON.parse(savedDocs) : MOCK_DOCS;
+  });
+  
+  const [selectedDoc, setSelectedDoc] = useState<Document>(() => {
+    const savedSelectedId = localStorage.getItem('ai_tutor_selected_doc_id');
+    const savedDocs = localStorage.getItem('ai_tutor_docs');
+    if (savedSelectedId && savedDocs) {
+      const parsedDocs = JSON.parse(savedDocs);
+      return parsedDocs.find((d: Document) => d.id === savedSelectedId) || parsedDocs[0] || MOCK_DOCS[0];
+    }
+    return MOCK_DOCS[0];
+  });
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -100,17 +120,101 @@ export default function App() {
     scrollToBottom();
   }, [messages]);
 
+  // Restore PDF URLs from IndexedDB on mount
+  useEffect(() => {
+    const restorePDFs = async () => {
+      const updatedDocs = await Promise.all(docs.map(async (doc) => {
+        if (doc.url) {
+          try {
+            const blob = await getPDF(doc.id);
+            if (blob) {
+              return { ...doc, url: URL.createObjectURL(blob) };
+            }
+          } catch (error) {
+            console.error(`Failed to restore PDF for ${doc.title}:`, error);
+          }
+        }
+        return doc;
+      }));
+      setDocs(updatedDocs);
+
+      // Also update selectedDoc with the new URL if it's one of the restored ones
+      if (selectedDoc.url) {
+        const matchingDoc = updatedDocs.find(d => d.id === selectedDoc.id);
+        if (matchingDoc) setSelectedDoc(matchingDoc);
+      }
+    };
+
+    restorePDFs();
+  }, []);
+
+  // Persist docs and selection to localStorage
+  useEffect(() => {
+    // Only store metadata to localStorage, not the blob URLs if possible, 
+    // but the restore logic expects them, so we store the presence of it.
+    localStorage.setItem('ai_tutor_docs', JSON.stringify(docs));
+  }, [docs]);
+
+  useEffect(() => {
+    localStorage.setItem('ai_tutor_selected_doc_id', selectedDoc.id);
+  }, [selectedDoc.id]);
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      setIsLoading(true);
+      const arrayBuffer = await file.arrayBuffer();
+      const pdfjsLib = await import('pdfjs-dist');
+      pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString();
+      
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      let fullText = '';
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const textContent = await page.getTextContent();
+        const pageText = textContent.items.map((item: any) => item.str).join(' ');
+        fullText += pageText + '\n\n';
+      }
+
+      const pdfUrl = URL.createObjectURL(file);
+      const newDoc: Document = {
+        id: Date.now().toString(),
+        title: file.name,
+        date: new Date().toLocaleDateString('ko-KR', { month: 'short', day: 'numeric', year: 'numeric' }),
+        content: fullText || '이 PDF에서 텍스트를 추출할 수 없습니다.',
+        url: pdfUrl
+      };
+
+      // Save binary to IndexedDB
+      await savePDF(newDoc.id, file);
+
+      setDocs([newDoc, ...docs]);
+      setSelectedDoc(newDoc);
+      
+      // Notify the user in chat
+      setMessages(prev => [...prev, { role: 'model', text: `"${file.name}" 파일을 잘 읽었습니다! 내용에 대해 무엇이든 질문해 주세요.` }]);
+    } catch (error) {
+      console.error("PDF Parse Error:", error);
+      alert('PDF 파일을 읽는 중 오류가 발생했습니다.');
+    } finally {
+      setIsLoading(false);
+      if (event.target) event.target.value = '';
+    }
+  };
+
   const handleSendMessage = async () => {
     if (!input.trim() || isLoading) return;
 
     if (!apiKey) {
-      setMessages(prev => [...prev, { role: 'model', text: "Please set your Gemini API Key in the settings first." }]);
+      setMessages(prev => [...prev, { role: 'model', text: "먼저 설정에서 Gemini API 키를 입력해주세요." }]);
       setIsSettingsOpen(true);
       return;
     }
 
     if (isOffline) {
-      setMessages(prev => [...prev, { role: 'model', text: "You are currently offline. Please check your connection." }]);
+      setMessages(prev => [...prev, { role: 'model', text: "현재 오프라인 상태입니다. 인터넷 연결을 확인해주세요." }]);
       return;
     }
 
@@ -124,20 +228,47 @@ export default function App() {
       const chat = ai.chats.create({
         model: "gemini-3-flash-preview",
         config: {
-          systemInstruction: `You are an AI Tutor. You are helping a student with a document titled "${selectedDoc.title}". 
-          The content of the document is: "${selectedDoc.content}". 
-          Answer questions based on this content. If the question is not related, politely guide them back to the topic or answer generally if appropriate.`,
+          systemInstruction: `당신은 AI 튜터입니다. 학생이 "${selectedDoc.title}" 문서에 대해 학습하는 것을 돕습니다. 
+          문서 내용은 다음과 같습니다: "${selectedDoc.content}". 
+          
+          대답 규칙:
+          1. 항상 한국어로 답변하세요.
+          2. 쓸데없는 대화(인사, 도입부, 맺음말 등)는 생략하고, 질문에 대한 핵심 답변과 문제풀이 과정만 간결하게 제시하세요.
+          3. 수학 수식이나 물리 공식 등이 포함될 경우 반드시 Latex 형식을 사용하세요. (인라인: $...$, 블록: $$...$$)
+          4. 문서 내용과 관련 없는 질문이라면 주제로 돌아오도록 정중하게 한 문장으로만 안내하세요.`,
         },
       });
 
       const response = await chat.sendMessage({ message: input });
-      const botMessage: Message = { role: 'model', text: response.text || "I'm sorry, I couldn't process that." };
+      const botMessage: Message = { role: 'model', text: response.text || "죄송합니다, 요청을 처리할 수 없습니다." };
       setMessages(prev => [...prev, botMessage]);
     } catch (error) {
       console.error("Chat Error:", error);
-      setMessages(prev => [...prev, { role: 'model', text: "Error: Failed to connect to AI Tutor." }]);
+      setMessages(prev => [...prev, { role: 'model', text: "오류: AI 튜터에 연결하지 못했습니다." }]);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleDeleteDoc = async (docId: string, event: React.MouseEvent) => {
+    event.stopPropagation();
+    const updatedDocs = docs.filter(doc => doc.id !== docId);
+    setDocs(updatedDocs);
+    
+    // Delete from IndexedDB if it was a PDF
+    try {
+      await deletePDF(docId);
+    } catch (error) {
+      console.warn("Failed to delete from IndexedDB:", error);
+    }
+    
+    if (selectedDoc.id === docId) {
+      if (updatedDocs.length > 0) {
+        setSelectedDoc(updatedDocs[0]);
+      } else {
+        // Fallback or empty state could be handled here if needed
+        // For now, we'll keep the last one or set to a placeholder
+      }
     }
   };
 
@@ -153,7 +284,7 @@ export default function App() {
         <div className="p-6 flex items-center justify-between border-b border-gray-50">
           <h1 className="text-xl font-extrabold tracking-tight flex items-center gap-2">
             <Bot className="w-6 h-6 text-[#4D5E8B]" />
-            AI Tutor
+            AI 튜터
           </h1>
           <div className="flex gap-1">
             <button onClick={() => setIsSettingsOpen(true)} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
@@ -170,14 +301,14 @@ export default function App() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             <input 
               type="text" 
-              placeholder="Search documents..." 
+              placeholder="문서 검색..." 
               className="w-full pl-10 pr-4 py-2 bg-[#F4F3FA] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#4D5E8B]/20"
             />
           </div>
 
-          <p className="text-[10px] font-bold text-gray-400 tracking-widest uppercase px-2 mb-2">Recent Documents</p>
+          <p className="text-[10px] font-bold text-gray-400 tracking-widest uppercase px-2 mb-2">최근 문서</p>
           
-          {MOCK_DOCS.map(doc => (
+          {docs.map(doc => (
             <button
               key={doc.id}
               onClick={() => setSelectedDoc(doc)}
@@ -190,9 +321,25 @@ export default function App() {
                 <p className="text-sm font-bold truncate">{doc.title}</p>
                 <p className={`text-[10px] mt-0.5 ${selectedDoc.id === doc.id ? 'text-white/70' : 'text-gray-400'}`}>{doc.date}</p>
               </div>
-              <MoreVertical className={`w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity ${selectedDoc.id === doc.id ? 'text-white' : 'text-gray-400'}`} />
+              <button
+                onClick={(e) => handleDeleteDoc(doc.id, e)}
+                className={`p-1.5 rounded-lg opacity-0 group-hover:opacity-100 transition-all hover:bg-black/10 ${
+                  selectedDoc.id === doc.id ? 'text-white hover:bg-white/20' : 'text-gray-400 hover:text-red-500'
+                }`}
+                title="삭제"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
             </button>
           ))}
+        </div>
+
+        <div className="px-4 pb-4">
+          <label className="flex items-center justify-center gap-2 w-full p-3 border-2 border-dashed border-[#ACBDF1] rounded-2xl hover:bg-[#F4F3FA] cursor-pointer transition-colors text-[#4D5E8B] font-bold text-sm">
+            {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
+            {isLoading ? 'PDF 읽는 중...' : 'PDF 업로드'}
+            <input type="file" accept="application/pdf" className="hidden" onChange={handleFileUpload} disabled={isLoading} />
+          </label>
         </div>
 
         <div className="p-4 border-t border-gray-50">
@@ -202,7 +349,7 @@ export default function App() {
             </div>
             <div className="flex-grow overflow-hidden">
               <p className="text-sm font-bold truncate">salyman82@gmail.com</p>
-              <p className="text-[10px] text-gray-400 uppercase tracking-widest">Pro Member</p>
+              <p className="text-[10px] text-gray-400 uppercase tracking-widest">프로 멤버</p>
             </div>
           </div>
         </div>
@@ -226,52 +373,60 @@ export default function App() {
             </div>
             <h2 className="text-lg font-bold truncate max-w-md">{selectedDoc.title}</h2>
           </div>
-          <div className="flex items-center gap-2">
-            <button className="px-4 py-2 text-sm font-bold text-[#4D5E8B] hover:bg-[#F4F3FA] rounded-xl transition-colors flex items-center gap-2">
-              <ExternalLink className="w-4 h-4" />
-              Open Original
-            </button>
-          </div>
+
         </header>
 
         <div className="flex-grow p-10 overflow-y-auto bg-[#F8F9FB]">
-          <div className="max-w-3xl mx-auto bg-white shadow-sm border border-gray-100 rounded-xl p-12 min-h-[1000px]">
-            <div className="prose prose-slate max-w-none">
-              <h1 className="text-3xl font-extrabold mb-8 text-[#30323B]">{selectedDoc.title.replace('.pdf', '')}</h1>
-              <div className="space-y-6 text-[#5D5F68] leading-relaxed text-lg">
-                {selectedDoc.content.split('\n\n').map((para, i) => (
-                  <p key={i}>{para}</p>
-                ))}
-                
-                {/* Simulated PDF Content Filler */}
-                <div className="pt-8 space-y-4 opacity-20 select-none pointer-events-none">
-                  <div className="h-4 bg-gray-200 rounded w-full"></div>
-                  <div className="h-4 bg-gray-200 rounded w-5/6"></div>
-                  <div className="h-4 bg-gray-200 rounded w-4/6"></div>
-                  <div className="h-4 bg-gray-200 rounded w-full"></div>
-                  <div className="h-4 bg-gray-200 rounded w-3/4"></div>
+          {selectedDoc.url ? (
+            <div className="max-w-4xl mx-auto bg-white shadow-sm border border-gray-100 rounded-xl overflow-hidden h-full min-h-[calc(100vh-160px)]">
+              <iframe 
+                src={`${selectedDoc.url}#view=FitH`} 
+                className="w-full h-full border-0 min-h-[calc(100vh-160px)]" 
+                title="PDF Viewer"
+              />
+            </div>
+          ) : (
+            <div className="max-w-3xl mx-auto bg-white shadow-sm border border-gray-100 rounded-xl p-12 min-h-[1000px]">
+              <div className="prose prose-slate max-w-none">
+                <h1 className="text-3xl font-extrabold mb-8 text-[#30323B]">{selectedDoc.title.replace('.pdf', '')}</h1>
+                <div className="space-y-6 text-[#5D5F68] leading-relaxed text-lg">
+                  {selectedDoc.content.split('\n\n').map((para, i) => (
+                    <p key={i}>{para}</p>
+                  ))}
+                  
+                  {/* Simulated PDF Content Filler */}
+                  <div className="pt-8 space-y-4 opacity-20 select-none pointer-events-none">
+                    <div className="h-4 bg-gray-200 rounded w-full"></div>
+                    <div className="h-4 bg-gray-200 rounded w-5/6"></div>
+                    <div className="h-4 bg-gray-200 rounded w-4/6"></div>
+                    <div className="h-4 bg-gray-200 rounded w-full"></div>
+                    <div className="h-4 bg-gray-200 rounded w-3/4"></div>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       </main>
 
       {/* Right Pane: AI Tutor Chat */}
-      <section className="w-[400px] bg-white border-l border-gray-100 flex flex-col">
+      <motion.section 
+        animate={{ width: isSidebarOpen ? 400 : 720 }}
+        className="bg-white border-l border-gray-100 flex flex-col overflow-hidden"
+      >
         <header className="p-6 border-b border-gray-50">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-[#E8CDFD] rounded-full flex items-center justify-center">
               <Bot className="w-6 h-6 text-[#6C567F]" />
             </div>
             <div>
-              <h2 className="text-sm font-bold">AI Tutor Chat</h2>
+              <h2 className="text-sm font-bold">AI 튜터 챗</h2>
               {isOffline ? (
                 <p className="text-[10px] text-red-500 font-bold uppercase tracking-widest flex items-center gap-1">
-                  <WifiOff className="w-3 h-3" /> Offline
+                  <WifiOff className="w-3 h-3" /> 오프라인
                 </p>
               ) : (
-                <p className="text-[10px] text-green-500 font-bold uppercase tracking-widest">Online & Ready</p>
+                <p className="text-[10px] text-green-500 font-bold uppercase tracking-widest">온라인 상태</p>
               )}
             </div>
           </div>
@@ -283,9 +438,9 @@ export default function App() {
               <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center">
                 <Bot className="w-8 h-8 text-[#4D5E8B]" />
               </div>
-              <h3 className="font-bold text-sm">Ask me anything about this document!</h3>
+              <h3 className="font-bold text-sm">이 문서에 대해 무엇이든 물어보세요!</h3>
               <p className="text-xs text-gray-400 leading-relaxed">
-                I can help you summarize chapters, solve problems, or explain complex concepts in simple terms.
+                단원 요약, 문제 풀이, 복잡한 개념을 쉽게 설명해 드릴 수 있습니다.
               </p>
             </div>
           )}
@@ -298,12 +453,17 @@ export default function App() {
                 animate={{ opacity: 1, y: 0 }}
                 className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                <div className={`max-w-[85%] p-4 rounded-2xl text-sm shadow-sm ${
+                <div className={`max-w-[85%] p-4 rounded-2xl text-sm shadow-sm prose prose-sm ${
                   msg.role === 'user' 
-                    ? 'bg-[#4D5E8B] text-white rounded-tr-none' 
+                    ? 'bg-[#4D5E8B] text-white rounded-tr-none prose-invert' 
                     : 'bg-white text-[#30323B] border border-gray-50 rounded-tl-none'
                 }`}>
-                  {msg.text}
+                  <ReactMarkdown 
+                    remarkPlugins={[remarkMath]} 
+                    rehypePlugins={[rehypeKatex]}
+                  >
+                    {msg.text}
+                  </ReactMarkdown>
                 </div>
               </motion.div>
             ))}
@@ -313,7 +473,7 @@ export default function App() {
             <div className="flex justify-start">
               <div className="bg-white border border-gray-50 p-4 rounded-2xl rounded-tl-none shadow-sm flex items-center gap-2">
                 <Loader2 className="w-4 h-4 animate-spin text-[#4D5E8B]" />
-                <span className="text-xs text-gray-400 font-medium">Tutor is thinking...</span>
+                <span className="text-xs text-gray-400 font-medium">튜터가 생각 중...</span>
               </div>
             </div>
           )}
@@ -331,7 +491,7 @@ export default function App() {
                   handleSendMessage();
                 }
               }}
-              placeholder="Ask a question..."
+              placeholder="질문을 입력하세요..."
               className="w-full pl-4 pr-12 py-3 bg-[#F4F3FA] rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-[#4D5E8B]/20 resize-none min-h-[44px] max-h-32"
               rows={1}
             />
@@ -344,10 +504,10 @@ export default function App() {
             </button>
           </div>
           <p className="text-[10px] text-center text-gray-400 mt-3">
-            Powered by Gemini AI • Press Enter to send
+            Powered by Gemini AI • Enter 키를 눌러 전송
           </p>
         </div>
-      </section>
+      </motion.section>
 
       {/* Settings Modal */}
       <AnimatePresence>
@@ -360,14 +520,14 @@ export default function App() {
               className="bg-white rounded-3xl shadow-xl w-full max-w-md overflow-hidden"
             >
               <div className="p-6 border-b border-gray-50 flex items-center justify-between">
-                <h2 className="text-xl font-bold">Settings</h2>
+                <h2 className="text-xl font-bold">설정</h2>
                 <button onClick={() => setIsSettingsOpen(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors">
                   <X className="w-5 h-5 text-gray-500" />
                 </button>
               </div>
               <div className="p-6 space-y-4">
                 <div>
-                  <label className="block text-sm font-bold text-gray-700 mb-2">Gemini API Key</label>
+                  <label className="block text-sm font-bold text-gray-700 mb-2">Gemini API 키</label>
                   <input 
                     type="password" 
                     value={tempKey}
@@ -376,8 +536,8 @@ export default function App() {
                     className="w-full px-4 py-3 bg-[#F4F3FA] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#4D5E8B]/20"
                   />
                   <p className="text-xs text-gray-500 mt-2 leading-relaxed">
-                    Your API key is stored locally on your device and is never sent to our servers. 
-                    Get your key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[#4D5E8B] hover:underline">Google AI Studio</a>.
+                    API 키는 기기에 로컬로 저장되며 서버로 전송되지 않습니다. 
+                    <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[#4D5E8B] hover:underline">Google AI Studio</a>에서 키를 발급받으세요.
                   </p>
                 </div>
               </div>
@@ -386,13 +546,13 @@ export default function App() {
                   onClick={() => setIsSettingsOpen(false)}
                   className="px-6 py-2.5 text-sm font-bold text-gray-600 hover:bg-gray-200 rounded-xl transition-colors"
                 >
-                  Cancel
+                  취소
                 </button>
                 <button 
                   onClick={saveApiKey}
                   className="px-6 py-2.5 text-sm font-bold bg-[#4D5E8B] text-white rounded-xl shadow-md hover:bg-[#3A4A70] transition-colors"
                 >
-                  Save Settings
+                  설정 저장
                 </button>
               </div>
             </motion.div>

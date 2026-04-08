@@ -107,6 +107,13 @@ export default function App() {
     };
   }, []);
 
+  // API 키가 없으면 자동으로 설정창 열기 (학생 배포용)
+  useEffect(() => {
+    if (!apiKey) {
+      setTimeout(() => setIsSettingsOpen(true), 1000);
+    }
+  }, []);
+
   const saveApiKey = () => {
     localStorage.setItem('gemini_api_key', tempKey);
     setApiKey(tempKey);
@@ -234,7 +241,7 @@ export default function App() {
     if (!input.trim() || isLoading) return;
 
     if (!apiKey) {
-      setMessages(prev => [...prev, { role: 'model', text: "먼저 설정에서 Gemini API 키를 입력해주세요." }]);
+      setMessages(prev => [...prev, { role: 'model', text: "시스템을 사용하려면 먼저 오른쪽 상단 '설정' 메뉴에서 본인의 Gemini API 키를 입력해 주세요. 키가 없으면 발급 가이드를 참고하세요." }]);
       setIsSettingsOpen(true);
       return;
     }
@@ -568,20 +575,44 @@ export default function App() {
                   <X className="w-5 h-5 text-gray-500" />
                 </button>
               </div>
-              <div className="p-6 space-y-4">
+              <div className="p-6 space-y-5">
+                {!apiKey && (
+                  <div className="p-4 bg-red-50 border border-red-100 rounded-2xl">
+                    <p className="text-xs text-red-600 font-bold flex items-center gap-2">
+                      <WifiOff className="w-3 h-3" /> API 키가 설정되지 않았습니다.
+                    </p>
+                    <p className="text-[10px] text-red-500 mt-1">AI 튜터를 사용하려면 개인 키가 필요합니다.</p>
+                  </div>
+                )}
+                
                 <div>
-                  <label className="block text-sm font-bold text-gray-700 mb-2">Gemini API 키</label>
+                  <label className="block text-sm font-bold text-gray-700 mb-2">Gemini API 키 입력</label>
                   <input 
                     type="password" 
                     value={tempKey}
                     onChange={(e) => setTempKey(e.target.value)}
                     placeholder="AIzaSy..."
-                    className="w-full px-4 py-3 bg-[#F4F3FA] rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-[#4D5E8B]/20"
+                    className={`w-full px-4 py-3 bg-[#F4F3FA] rounded-xl text-sm focus:outline-none focus:ring-2 ${
+                      !tempKey ? 'ring-2 ring-red-200 focus:ring-red-400' : 'focus:ring-[#4D5E8B]/20'
+                    }`}
                   />
-                  <p className="text-xs text-gray-500 mt-2 leading-relaxed">
-                    API 키는 기기에 로컬로 저장되며 서버로 전송되지 않습니다. 
-                    <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noreferrer" className="text-[#4D5E8B] hover:underline">Google AI Studio</a>에서 키를 발급받으세요.
-                  </p>
+                  <div className="mt-4 p-4 bg-[#F8F9FB] rounded-2xl border border-gray-100">
+                    <p className="text-[11px] font-bold text-[#4D5E8B] mb-2">🔑 키 발급 방법 (1분 소요):</p>
+                    <ol className="text-[10px] text-gray-600 space-y-1.5 list-decimal pl-4">
+                      <li>아래 <b>'무료 키 발급받기'</b> 버튼을 클릭합니다.</li>
+                      <li>Google 계정으로 로그인 후 <b>'Create API key'</b>를 누릅니다.</li>
+                      <li>생성된 키를 복사해서 위 칸에 붙여넣고 저장하세요.</li>
+                    </ol>
+                    <a 
+                      href="https://aistudio.google.com/app/apikey" 
+                      target="_blank" 
+                      rel="noreferrer" 
+                      className="mt-3 flex items-center justify-center gap-2 w-full p-2.5 bg-white border border-[#4D5E8B]/30 rounded-xl text-[11px] font-bold text-[#4D5E8B] hover:bg-[#4D5E8B] hover:text-white transition-all shadow-sm"
+                    >
+                      무료 키 발급받기 (Google AI Studio)
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
                 </div>
               </div>
               <div className="p-6 bg-gray-50 flex justify-end gap-3">

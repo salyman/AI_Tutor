@@ -392,17 +392,6 @@ export default function App() {
           </label>
         </div>
 
-        <div className="p-4 border-t border-gray-50">
-          <div className="flex items-center gap-3 p-3 bg-[#F4F3FA] rounded-2xl">
-            <div className="w-10 h-10 bg-[#ACBDF1] rounded-full flex items-center justify-center">
-              <User className="w-6 h-6 text-[#283964]" />
-            </div>
-            <div className="flex-grow overflow-hidden">
-              <p className="text-sm font-bold truncate">salyman82@gmail.com</p>
-              <p className="text-[10px] text-gray-400 uppercase tracking-widest">프로 멤버</p>
-            </div>
-          </div>
-        </div>
       </motion.aside>
 
       {/* Toggle Sidebar Button */}

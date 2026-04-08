@@ -15,7 +15,7 @@ import {
   MoreVertical,
   ExternalLink,
   Loader2,
-  Settings,
+  Key,
   X,
   WifiOff,
   Trash2
@@ -325,11 +325,12 @@ export default function App() {
             AI 튜터
           </h1>
           <div className="flex gap-1">
-            <button onClick={() => setIsSettingsOpen(true)} className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
-              <Settings className="w-5 h-5 text-[#5D5F68]" />
-            </button>
-            <button className="p-2 hover:bg-gray-100 rounded-xl transition-colors">
-              <Plus className="w-5 h-5 text-[#4D5E8B]" />
+            <button 
+              onClick={() => setIsSettingsOpen(true)} 
+              className="p-2 hover:bg-gray-100 rounded-xl transition-colors"
+              title="API 키 설정"
+            >
+              <Key className="w-5 h-5 text-[#4D5E8B]" />
             </button>
           </div>
         </div>
